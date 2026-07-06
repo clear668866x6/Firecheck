@@ -865,6 +865,9 @@ class FlameDetector:
             """
             WebSocket 连接处理器, 每个客户端连接对应一个协程实例。
             首帧发送设备元数据 JSON，随后持续推送标注后的检测画面帧。
+
+            :param ws: websockets 库的 WebSocketServerProtocol 对象, 代表与单个客户端的连接,
+                       通过 ws.send() 推送数据, 通过 ws.remote_address 获取客户端地址
             """
             logger.info(f"[WS] New connection from {ws.remote_address}")
             try:
