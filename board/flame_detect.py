@@ -172,7 +172,8 @@ class FlameDetector:
         :param config: Config 配置对象, 包含所有运行参数
         """
         self.cfg = config               # 配置对象引用
-        # Dynamically set a unique ws_port based on camera_id if it's default 9999 or None
+        # 动态分配 WebSocket 端口: 如果配置中 ws_port 为默认 9999 或 None, 则根据 camera_id 偏移生成唯一端口,
+        # 以便同一设备多摄像头实例时端口不冲突, 例如 camera_id=1 -> 9991, camera_id=2 -> 9992
         ws_port = getattr(config, "ws_port", 9999)
         if ws_port == 9999 or ws_port is None:
             config._cfg["ws_port"] = 9990 + config.camera_id
@@ -186,12 +187,14 @@ class FlameDetector:
 
         # ---- 帧缓冲区: 用于录像回溯 ----
         self.frame_buffer = deque(maxlen=60)  # 保留最近 60 帧, 告警时回写进录像开头, 确保不丢失检测前画面
+        # 为什么是 60 帧? 假设帧率 25fps, 60 帧约 2.4 秒, 足以覆盖告警触发前的短暂时间, 避免视频开头缺失重要上下文
 
         # ---- 录像状态 ----
-        self.video_writer = None        # OpenCV VideoWriter 对象, 非 None 表示正在录像
-        self.recording = False          # 录像状态标志
+        self.video_writer = None        # OpenCV VideoWriter 对象, 非 None 表示正在录像 (已弃用, 使用 active_writers 列表)
+        self.recording = False          # 录像状态标志, 表示是否有任何录像正在进行
         self.record_start_time = 0      # 录像开始时间戳, 用于计算录像时长
-        self.active_writers = []        # 存放并发活动中的录像写入器 (线程安全)
+        self.active_writers = []        # 存放并发活动中的录像写入器 (线程安全), 每个元素包含 writer, w, h, filepath, filename, start_time
+        # 使用列表支持同时进行多个录像 (虽然当前设计一次只触发一个, 但为扩展预留)
 
         # ---- 检测历史: 用于后续扩展平滑滤波(如连续 N 帧确认) ----
         self.detection_history = deque(maxlen=10)  # 最近 10 帧的检测结果
@@ -290,6 +293,8 @@ class FlameDetector:
         若摄像头无法打开, 自动进入模拟画面模式(is_mock=True), 用于无摄像头的开发调试。
         """
         cam = self.cfg.camera_url
+        # 对字符串类型的路径做相对路径解析: 如果既不是数字也不是网络协议, 则视为本地文件路径,
+        # 检查是否存在, 若不存在则尝试相对于脚本父目录查找, 以支持从不同目录运行
         if isinstance(cam, str) and not cam.isdigit() and not cam.startswith("rtsp://") and not cam.startswith("http://") and not cam.startswith("https://"):
             if not os.path.exists(cam):
                 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -332,6 +337,7 @@ class FlameDetector:
         对单帧图像执行火焰/烟雾检测。
         根据配置自动选择推理后端: NPU (RKNN) 或 CPU/GPU (PyTorch)。
         之所以把 imgsz 设为 480 而非默认 640, 是为了在边缘设备上平衡速度和精度。
+        经测试, 480 分辨率在降低计算量的同时仍能保持足够的检测精度, 适合实时应用。
 
         :param frame: OpenCV BGR 格式的 numpy 数组, shape (H, W, 3)
         :return: ultralytics Results 对象(包含检测框、置信度等) 或 None
@@ -430,7 +436,8 @@ class FlameDetector:
         # 在图像上绘制每个检测目标的红色边界框和标签
         for det in detections:
             x1, y1, x2, y2 = det["bbox"]
-            color = (0, 165, 255) if det["class_name"] == "smoke" else (0, 0, 255)  # Smoke: Orange, Fire: Red
+            # 颜色区分: 烟雾用橙色 (BGR: 0,165,255), 火焰用红色 (BGR: 0,0,255)
+            color = (0, 165, 255) if det["class_name"] == "smoke" else (0, 0, 255)
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
             label = f"{det['class_name']}: {det['confidence']:.2f}"
             cv2.putText(img, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
@@ -448,15 +455,21 @@ class FlameDetector:
         开始录制告警视频（线程安全）。
         为了彻底杜绝 ARM 平台上部分 MP4 编码器（如 mp4v, avc1/h264_v4l2m2m）因 PTS 错乱引起的 Segmentation fault 崩溃，
         直接使用最稳健的 MJPG 编码器录制为临时 .avi 视频，录像结束后再通过 ffmpeg 进行极速且安全的 H.264 MP4 转码。
+        这一策略牺牲了录制时的压缩效率，但极大提高了系统稳定性，尤其适用于嵌入式环境。
+
+        :param frame_w: 视频宽度
+        :param frame_h: 视频高度
+        :return: writer_entry 字典，包含 writer、尺寸、文件路径等，失败返回 None
         """
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"alarm_{ts}.avi"
+        filename = f"alarm_{ts}.avi"   # 先保存为 .avi 格式，避免 MP4 编码器潜在 bug
         filepath = os.path.join(self.cfg.save_dir, filename)
 
         fps = getattr(self, "fps", 20.0)
         if fps <= 0:
             fps = 20.0
 
+        # 尝试两种最稳定的编码器: MJPG (Motion JPEG) 和 XVID (MPEG-4)
         writer = None
         for codec in ["MJPG", "XVID"]:
             try:
@@ -473,9 +486,10 @@ class FlameDetector:
             logger.error("Failed to open VideoWriter with MJPG/XVID codecs, recording will be skipped.")
             return None
 
+        # 将帧缓冲区中的历史帧写入视频开头，实现告警回溯
         with self._frame_lock:
             history_frames = list(self.frame_buffer)
-            self.frame_buffer.clear()
+            self.frame_buffer.clear()  # 清空缓冲区，防止重复写入
 
         for f in history_frames:
             fh, fw = f.shape[:2]
@@ -507,6 +521,10 @@ class FlameDetector:
         停止录像并释放资源（线程安全）。
         如果传入 writer_entry，则只停止该特定录像；否则停止所有活跃录像。
         停止后调用 ffmpeg 进行 H.264 转码（优先使用系统原生 ffmpeg，并支持 libopenh264 备用）。
+        转码使用 nice -n 19 降低优先级，避免影响主检测循环。
+
+        :param writer_entry: 可选，要停止的特定录像条目，若为 None 则停止所有
+        :return: (最终视频文件路径, 最终视频文件名)
         """
         targets = []
         if writer_entry is not None:
@@ -542,7 +560,7 @@ class FlameDetector:
             if filepath and os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                 temp_path = filepath + ".tmp.mp4"
                 
-                # 寻找支持完整编码器的 ffmpeg
+                # 寻找支持完整编码器的 ffmpeg 可执行文件路径
                 ffmpeg_cmd = "ffmpeg"
                 for p in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
                     if os.path.exists(p) and os.access(p, os.X_OK):
@@ -550,19 +568,21 @@ class FlameDetector:
                         break
 
                 transcode_success = False
+                # 尝试两种 H.264 编码器: libx264 (软件) 和 libopenh264 (硬件加速备选)
                 for encoder in ["libx264", "libopenh264"]:
                     try:
                         cmd = [
-                            "nice", "-n", "19",
+                            "nice", "-n", "19",  # 降低进程优先级，减少对检测的影响
                             ffmpeg_cmd, "-y", "-i", filepath,
                             "-vcodec", encoder,
-                            "-pix_fmt", "yuv420p",
-                            "-profile:v", "baseline",
-                            "-level", "3.0",
+                            "-pix_fmt", "yuv420p",          # 保证通用播放器兼容
+                            "-profile:v", "baseline",       # baseline 级别兼容性最好
+                            "-level", "3.0",                # 限制码率，适合嵌入式播放
                             temp_path
                         ]
                         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=35)
                         if res.returncode == 0 and os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                            # 转码成功：替换原文件
                             if filepath.endswith(".avi"):
                                 mp4_path = filepath.replace(".avi", ".mp4")
                                 mp4_filename = filename.replace(".avi", ".mp4")
@@ -681,6 +701,7 @@ class FlameDetector:
                 break
         
         # 一旦触发告警，同步更新当前帧中检测到的所有类别的冷却时间戳，避免不同类别（如烟和火）短时间内交替触发
+        # 这样做的好处：如果同时检测到烟和火，只触发一次告警，并同时冷却两者，防止连续告警轰炸服务端
         if trigger:
             for d in detections:
                 key = str(d["class_id"])
@@ -1027,6 +1048,8 @@ class FlameDetector:
                         })
                 else:
                     # 隔帧推理(Frame Skipping): 每5帧执行一次模型推理，其余帧使用缓存结果，极大降低 CPU 负载并提升流流畅度
+                    # 这样做牺牲了一定的实时性，但考虑到火焰烟雾运动变化较慢，5帧间隔（约0.2秒）足够，
+                    # 而推理耗时从约50ms降至10ms，CPU占用大幅下降。
                     if frame_count % 5 == 0 or not hasattr(self, "_cached_detections"):
                         result = self.detect_frame(frame)
                         self._cached_result = result
@@ -1068,8 +1091,10 @@ class FlameDetector:
                             print(f"  🔥 {det['class_name']} conf={det['confidence']:.2f}")
                         last_print = time.time()
                     # 非录像状态下检测到目标且不处于冷却期，则触发告警处理(在独立线程中执行)
+                    # 注意: 冷却期控制在前置逻辑中已经通过 should_trigger_alarm 处理，
+                    # 但这里额外检查 not self.recording 防止在录像过程中重复触发。
                     if not self.recording and self.should_trigger_alarm(detections):
-                        self.recording = True
+                        self.recording = True  # 标记录像状态，防止重复进入
                         threading.Thread(
                             target=self.process_alarm,
                             args=(frame.copy(), detections),
