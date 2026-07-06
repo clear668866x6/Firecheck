@@ -36,7 +36,7 @@
 
 ## 项目简介
 
-FireCheck 是一套**端到端的智能火焰烟雾检测及预警管理系统**，由边缘设备端和中心 Web 服务端两部分组成。边缘设备基于 Orange Pi 5 (RK3588S) 运行 YOLOv11 模型实时检测摄像头画面，检测到火情后自动截图、录像并上报至中心服务端；管理员通过 Web 数据大屏实时监控、处理和审核每一条告警事件。
+FireCheck 是一套**端到端的智能火焰烟雾检测及预警管理系统**，由边缘设备端和中心 Web 服务端两部分组成。边缘设备基于 Orange Pi 5 Pro (RK3588S) 运行 YOLOv11 模型实时检测摄像头画面，检测到火情后自动截图、录像并上报至中心服务端；管理员通过 Web 数据大屏实时监控、处理和审核每一条告警事件。
 
 > 🎯 **设计目标**：低成本、高可靠、易部署的工业/校园级火灾预警解决方案。
 
@@ -59,7 +59,7 @@ FireCheck 是一套**端到端的智能火焰烟雾检测及预警管理系统**
 ### 🌐 中心 Web 服务端
 | 功能 | 说明 |
 |------|------|
-| **数据大屏仪表盘** | ECharts + 百度地图，实时展示报警统计、月度趋势、区域分布、设备地图 |
+| **数据大屏仪表盘** | ECharts + Leaflet 地图 (OpenStreetMap)，实时展示报警统计、月度趋势、区域分布、设备地图 |
 | **告警处理工作流** | 三级状态流转：待处理 → 已处理 → 已审核 |
 | **角色权限控制** | 超级管理员 / 处理人 / 审核人，基于装饰器的 RBAC 鉴权 |
 | **部门 & 用户管理** | 树形部门结构，用户与角色绑定，SHA256 密码哈希 |
@@ -73,7 +73,7 @@ FireCheck 是一套**端到端的智能火焰烟雾检测及预警管理系统**
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                      边缘设备 (Orange Pi 5 / RK3588S)              │
+│                      边缘设备 (Orange Pi 5 Pro / RK3588S)          │
 │                                                                   │
 │  ┌──────────┐    ┌──────────────────┐    ┌────────────────────┐  │
 │  │ 摄像头/RTSP │───▶│  flame_detect.py  │───▶│  WebSocket :9999+  │  │
@@ -98,7 +98,7 @@ FireCheck 是一套**端到端的智能火焰烟雾检测及预警管理系统**
 │  ┌────────────────┐  ┌────────────────┐  ┌────────────────────┐  │
 │  │  数据大屏仪表盘  │  │   管理后台 CRUD  │  │   REST API 接口    │  │
 │  │  ECharts 图表   │  │  设备·用户·角色  │  │  /api/heartbeat   │  │
-│  │  百度地图标注   │  │  告警·审核·日志  │  │  /api/alarm       │  │
+│  │  Leaflet 地图标注│  │  告警·审核·日志  │  │  /api/alarm       │  │
 │  └────────────────┘  └────────────────┘  │  /api/device/error │  │
 │                                           │  /api/stats        │  │
 │  ┌────────────────────────────────────┐  └────────────────────┘  │
@@ -134,7 +134,7 @@ FireCheck 是一套**端到端的智能火焰烟雾检测及预警管理系统**
 | **边缘端框架** | Python 3.10+, threading, asyncio | 并发检测、心跳、WebSocket |
 | **服务端框架** | Flask 3.x | Web 管理后台 + REST API |
 | **数据库** | SQLite (WAL 模式) | 设备、用户、告警、日志存储 |
-| **前端** | Bootstrap / Tailwind CSS + ECharts + 百度地图 | 数据大屏可视化 |
+| **前端** | Bootstrap / Tailwind CSS + ECharts + Leaflet (OpenStreetMap) | 数据大屏可视化 |
 | **通信协议** | HTTP REST + WebSocket | 数据上报 + 实时推流 |
 | **视频编码** | ffmpeg (libx264) | MJPG → H.264 安全转码 |
 
@@ -332,7 +332,7 @@ python train.py --data /path/to/data.yaml --epochs 100 --model-size m
 # 3. 验证已有模型
 python train.py --validate models/fire_yolov11.pt --data-yaml fire_dataset/data.yaml
 
-# 4. 导出 RKNN 格式 (Orange Pi 5 NPU 部署)
+# 4. 导出 RKNN 格式 (Orange Pi 5 Pro NPU 部署)
 python train.py --export-rknn models/fire_yolov11.pt
 
 # 5. 快速测试
@@ -489,7 +489,7 @@ Authorization: session cookie required
 
 ## 部署指南
 
-### 方案一：Orange Pi 5 边缘部署 (推荐)
+### 方案一：Orange Pi 5 Pro 边缘部署 (推荐)
 
 ```bash
 # 1. 刷写 Ubuntu 22.04 系统镜像
@@ -514,7 +514,7 @@ sudo systemctl enable --now firecheck
 ### 方案二：Linux 通用设备部署
 
 ```bash
-# 与 Orange Pi 5 部署流程基本一致, 仅需跳过 NPU 相关步骤
+# 与 Orange Pi 5 Pro 部署流程基本一致, 仅需跳过 NPU 相关步骤
 # 将配置文件中 use_npu 设为 false 即可使用 CPU 推理
 ```
 
