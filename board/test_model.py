@@ -390,8 +390,11 @@ class MainWindow(QMainWindow):
     # ==================== Qt 事件重写 ====================
     def resizeEvent(self, event):
         """
-        窗口大小改变时重新缩放显示图像，保持比例且不失真
-        重写 QWidget.resizeEvent
+        窗口大小改变时重新缩放显示图像，保持比例且不失真。
+        重写 QWidget.resizeEvent, Qt 在窗口尺寸变化时自动调用此方法。
+
+        :param event: PySide6.QtGui.QResizeEvent / PyQt5.QtGui.QResizeEvent 对象,
+                      包含窗口新旧尺寸信息, 此处用于触发画面重缩放
         """
         if self.current_qimage is not None:
             self.update_frame(self.current_qimage)
@@ -399,8 +402,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """
-        关闭窗口时安全停止后台推理线程，避免资源泄漏
-        重写 QWidget.closeEvent
+        关闭窗口时安全停止后台推理线程，避免资源泄漏。
+        重写 QWidget.closeEvent, 在窗口关闭前自动调用。
+
+        :param event: PySide6.QtGui.QCloseEvent / PyQt5.QtGui.QCloseEvent 对象,
+                      调用 event.accept() 确认关闭, event.ignore() 可取消关闭
         """
         self.thread.stop()
         event.accept()

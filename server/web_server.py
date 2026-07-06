@@ -44,6 +44,16 @@ app.secret_key = secrets.token_hex(32)
 
 @app.after_request
 def add_header(r):
+    """
+    Flask 全局响应后处理钩子：为所有 HTTP 响应添加禁用缓存的头信息。
+    通过 @app.after_request 装饰器注册, 每个请求响应返回前自动调用。
+    设置 Cache-Control/Pragma/Expires 为 no-cache 可防止浏览器缓存页面数据,
+    确保告警列表、设备状态等实时数据始终显示最新内容。
+
+    :param r: Flask Response 对象, 即即将返回给客户端的 HTTP 响应,
+              可直接修改其 headers 属性添加自定义头
+    :return: 修改后的 Response 对象 (必须返回, Flask 使用返回值作为最终响应)
+    """
     r.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     r.headers["Pragma"] = "no-cache"
     r.headers["Expires"] = "0"
@@ -417,8 +427,13 @@ def seed_data():
 
 
 def check_and_log_faults(db):
-    """自适应在线/离线故障检测：检查 T_Device 表中设备的最后连接时间，
+    """
+    自适应在线/离线故障检测：检查 T_Device 表中设备的最后连接时间，
     如果心跳超时超过 90 秒且设备为 'no' (未产生离线错误)，则自动生成离线记录。
+    同时会级联记录该设备下所有摄像头的故障信息, 并将设备标记为已生成错误(避免重复)。
+
+    :param db: sqlite3.Connection 数据库连接对象, 需已启用 row_factory 以便列名访问,
+               函数内部会执行 SELECT/INSERT/UPDATE 操作并 commit
     """
     try:
         now = datetime.now()
@@ -1497,8 +1512,14 @@ def api_camera_discover():
 
 @app.route("/uploads/<path:filename>")
 def uploaded_file(filename):
-    """提供上传文件的静态访问，如截图、录像、Logo 等。
+    """
+    提供上传文件的静态访问，如截图、录像、Logo 等。
     支持 HTTP Range 请求以确保视频在 Chrome/Safari 中能自由拖动和播放。
+    非视频文件直接使用 send_from_directory 静态返回,
+    视频文件解析 Range 头实现 206 Partial Content 分段传输。
+
+    :param filename: URL 路径参数, 文件相对于 UPLOAD_DIR 的子路径,
+                     例如 'pictures/20240706_abc123.jpg' 或 'videos/alarm.mp4'
     """
     import re
     from flask import Response, abort
@@ -1584,6 +1605,13 @@ def api_stats():
         dates.append((datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d"))
 
     def get_counts_by_date(raw):
+        """
+        将 SQL 查询返回的日期-数量列表转换为 {日期: 数量} 字典, 便于按日期查找。
+
+        :param raw: list[dict], 每个元素为 {'date': str, 'count': int} 格式,
+                     由 SQL GROUP BY 查询结果转换而来
+        :return: dict, 键为日期字符串('YYYY-MM-DD'), 值为对应的报警数量(int)
+        """
         res = {}
         for r in raw:
             res[r["date"]] = r["count"]
